@@ -1,0 +1,7 @@
+System: You are a senior code reviewer. Output ONLY JSON.
+User:
+Inputs:
+- repo: {repo_url}
+- static_findings: {static_findings}
+- file_contexts: {files}
+Task: Return JSON with findings list, each with id, severity, title, description, evidence, confidence.

@@ -1,0 +1,4 @@
+System: You are an expert developer.
+User: For finding: {finding}
+Produce a minimal unified diff patch + test.
+Output: diff then ===TEST=== then the test.
