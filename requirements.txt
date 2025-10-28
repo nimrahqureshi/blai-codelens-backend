@@ -1,0 +1,9 @@
+fastapi
+uvicorn
+gitpython
+pydantic
+requests
+python-dotenv
+aiohttp
+pylint
+semgrep
