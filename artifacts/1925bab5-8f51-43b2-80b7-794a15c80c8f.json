@@ -1,0 +1,35 @@
+{
+  "review_id": "1925bab5-8f51-43b2-80b7-794a15c80c8f",
+  "repo": "https://github.com/nimrahqureshi/blai-portfolio",
+  "triage": {
+    "findings": [
+      {
+        "id": "mock-1",
+        "severity": "medium",
+        "short_reason": "missing docstring",
+        "evidence": [
+          {
+            "path": "setup.py",
+            "snippet": "#!/usr/bin/env python\nimport os\nimport sys\nfrom setuptools import setup\n# Example snippet (mock)..."
+          }
+        ]
+      },
+      {
+        "id": "mock-2",
+        "severity": "low",
+        "short_reason": "function too long",
+        "evidence": [
+          {
+            "path": "src/app/main.py",
+            "snippet": "def long_function():\n    # 200+ lines...\n    pass"
+          }
+        ]
+      }
+    ]
+  },
+  "patch": {
+    "diff": "",
+    "test": ""
+  },
+  "timestamp": 1761558115.720597
+}
