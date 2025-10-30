@@ -1,8 +1,8 @@
 fastapi
 uvicorn
+requests
 gitpython
 pydantic
-requests
 python-dotenv
 aiohttp
 pylint
