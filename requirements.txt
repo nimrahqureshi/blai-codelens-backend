@@ -1,9 +1,9 @@
 fastapi
 uvicorn
-requests
 gitpython
-pydantic
-python-dotenv
 aiohttp
+python-dotenv
+requests
+pydantic
 pylint
 semgrep
