@@ -15,7 +15,11 @@ app = FastAPI(title="BLAI CodeLens Backend")
 # CORS setup (allow frontend to connect)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # For local dev; later restrict to frontend domain
+    allow_origins=[
+    "https://blai-portfolio.vercel.app",  # your frontend URL
+    "http://localhost:5173",              # optional: for local testing
+],
+# For local dev; later restrict to frontend domain
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -94,3 +98,4 @@ async def root():
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=True)
+
