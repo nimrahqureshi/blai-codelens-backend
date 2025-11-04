@@ -6,45 +6,43 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from dotenv import load_dotenv
 
-# Load environment variables from .env
+# Load environment variables
 load_dotenv()
 
-# Create FastAPI app
 app = FastAPI(title="BLAI CodeLens Backend")
 
-# CORS setup (allow frontend to connect)
+# ✅ CORS setup — allow both production + local dev
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-    "https://blai-portfolio.vercel.app",  # your frontend URL
-    "http://localhost:5173",              # optional: for local testing
-],
-# For local dev; later restrict to frontend domain
+        "https://blai-portfolio.vercel.app",
+        "https://www.blai-portfolio.vercel.app",  # include www just in case
+        "http://localhost:5173",                  # local testing
+        "http://127.0.0.1:5173",                  # sometimes vite uses this
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Load API key
+# ✅ Load API key safely
 API_KEY = os.getenv("BLAI_API_KEY", "dev_key")
 print(f"✅ Loaded BLAI_API_KEY: {API_KEY}")
 
-# In-memory job results (temporary store)
+# ✅ In-memory job results
 JOB_RESULTS = {}
 
-# Request model
+# ✅ Request model
 class SubmitRequest(BaseModel):
     repo_url: str
     ref: str | None = None
     notify_email: str | None = None
 
 
-# -------------------------------
-# 🧠 Async code review simulation
-# -------------------------------
+# ✅ Simulated async review
 async def enqueue_review(review_id: str, data: dict):
     print(f"📥 Started review job {review_id} for {data.get('repo_url')}")
-    await asyncio.sleep(4)  # simulate time (replace later with actual code analysis)
+    await asyncio.sleep(4)
 
     result = {
         "repo": data.get("repo_url"),
@@ -60,11 +58,7 @@ async def enqueue_review(review_id: str, data: dict):
     print(f"✅ Job {review_id} finished and stored results")
 
 
-# -------------------------------
-# 🚀 API Routes
-# -------------------------------
-
-# POST /submit — Start review
+# ✅ POST /submit
 @app.post("/submit")
 async def submit(req: SubmitRequest, request: Request):
     key = request.headers.get("x-api-key")
@@ -74,13 +68,11 @@ async def submit(req: SubmitRequest, request: Request):
     review_id = str(uuid.uuid4())
     print(f"📩 Received request for repo: {req.repo_url}")
 
-    # Start async review
     asyncio.create_task(enqueue_review(review_id, req.dict()))
-
     return {"review_id": review_id, "status": "queued"}
 
 
-# GET /artifacts/{id} — Get result of review
+# ✅ GET /artifacts/{id}
 @app.get("/artifacts/{review_id}")
 async def get_artifact(review_id: str):
     if review_id not in JOB_RESULTS:
@@ -88,14 +80,13 @@ async def get_artifact(review_id: str):
     return JOB_RESULTS[review_id]
 
 
-# GET / — Health check
+# ✅ Health check
 @app.get("/")
 async def root():
     return {"message": "✅ BLAI CodeLens backend is running properly"}
 
 
-# ✅ Run the app directly
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=True)
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
 
