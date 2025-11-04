@@ -11,18 +11,21 @@ load_dotenv()
 
 app = FastAPI(title="BLAI CodeLens Backend")
 
-# ✅ CORS setup — allow both production + local dev
+# ✅ Define allowed origins BEFORE adding middleware
+ALLOWED_ORIGINS = [
+    "https://blai-portfolio.vercel.app",
+    "https://www.blai-portfolio.vercel.app",
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+]
+
+# ✅ CORS setup
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "https://blai-portfolio.vercel.app",
-        "https://www.blai-portfolio.vercel.app",  # include www just in case
-        "http://localhost:5173",                  # local testing
-        "http://127.0.0.1:5173",                  # sometimes vite uses this
-    ],
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Content-Type", "x-api-key"],
 )
 
 # ✅ Load API key safely
@@ -89,4 +92,3 @@ async def root():
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
-
