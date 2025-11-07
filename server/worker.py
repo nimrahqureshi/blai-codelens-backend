@@ -16,7 +16,6 @@ except ImportError:
     triage_via_llm = None
     patch_via_llm = None
 
-
 ARTIFACTS_DIR = Path("artifacts")
 QUEUE_FILE = Path("queue.json")
 
@@ -89,49 +88,92 @@ async def process_review(review_id, payload):
             if len(files) >= 8:
                 break
 
-        # --- LLM triage ---
-        triage = None
-        patch_resp = None
+        # --- Build triage from static analyzers (deterministic) ---
+        def map_pylint_to_finding(item):
+            typ = item.get("type", "").lower()
+            severity = "low"
+            if typ in ("error", "fatal"):
+                severity = "high"
+            elif typ == "warning":
+                severity = "medium"
+            elif typ in ("refactor", "convention", "info"):
+                severity = "low"
 
-        if triage_via_llm:
-            try:
-                print("🧠 Running LLM triage...")
-                triage = triage_via_llm(review_id, repo_url, static_findings, files)
-                if triage and triage.get("findings"):
-                    patch_resp = patch_via_llm(triage["findings"][0], files, static_findings)
-            except Exception as e:
-                print("⚠️ LLM triage failed:", e)
+            path = item.get("path") or item.get("module") or "<unknown>"
+            line = item.get("line") or 0
+            message = item.get("message") or item.get("symbol") or "pylint issue"
 
-        # --- Fallback mock ---
-        if not triage:
-            print("⚙️ Using mock analysis fallback...")
+            return {
+                "id": f"pylint-{path}-{line}-{item.get('symbol','')}",
+                "tool": "pylint",
+                "severity": severity,
+                "title": item.get("symbol", typ),
+                "description": message,
+                "evidence": [{"path": path, "start_line": line, "snippet": ""}],
+                "confidence": 0.8,
+            }
+
+        def map_semgrep_to_finding(item):
+            extra = item.get("extra", {})
+            check_id = item.get("check_id") or extra.get("id") or "semgrep"
+            path = item.get("path") or extra.get("path") or "<unknown>"
+            start = None
+            if isinstance(item.get("start"), dict):
+                start = item["start"].get("line")
+            elif isinstance(extra.get("lines"), str):
+                start = 0
+            severity = extra.get("severity") or "medium"
+
+            sev_map = {"ERROR": "high", "WARNING": "medium", "INFO": "low"}
+            severity = sev_map.get(severity.upper(), "medium")
+
+            message = extra.get("message") or item.get("metadata", {}).get("message") or check_id
+            return {
+                "id": f"semgrep-{check_id}-{path}-{start}",
+                "tool": "semgrep",
+                "severity": severity,
+                "title": check_id,
+                "description": message,
+                "evidence": [{"path": path, "start_line": start or 0, "snippet": extra.get("lines","")[:400]}],
+                "confidence": 0.9 if severity == "high" else 0.7,
+            }
+
+        findings = []
+
+        try:
+            for item in (pylint_results or []):
+                findings.append(map_pylint_to_finding(item))
+        except Exception as e:
+            print("⚠️ pylint mapping failed:", e)
+
+        try:
+            semg_results_list = []
+            if isinstance(semgrep_results, dict) and "results" in semgrep_results:
+                semg_results_list = semgrep_results.get("results", [])
+            elif isinstance(semgrep_results, list):
+                semg_results_list = semgrep_results
+            for item in semg_results_list:
+                findings.append(map_semgrep_to_finding(item))
+        except Exception as e:
+            print("⚠️ semgrep mapping failed:", e)
+
+        if not findings:
             triage = {
                 "findings": [
                     {
-                        "id": "mock-1",
-                        "severity": "medium",
-                        "short_reason": "Missing docstring in setup.py",
-                        "evidence": [
-                            {
-                                "path": "setup.py",
-                                "snippet": "# Example snippet (mock)",
-                            }
-                        ],
-                    },
-                    {
-                        "id": "mock-2",
+                        "id": "no-issues",
                         "severity": "low",
-                        "short_reason": "Long function in main.py",
-                        "evidence": [
-                            {
-                                "path": "src/app/main.py",
-                                "snippet": "def long_function(): pass",
-                            }
-                        ],
-                    },
+                        "short_reason": "No issues detected by static analyzers.",
+                        "evidence": []
+                    }
                 ]
             }
-            patch_resp = {"diff": "", "test": ""}
+        else:
+            severity_order = {"high": 3, "medium": 2, "low": 1}
+            findings_sorted = sorted(findings, key=lambda f: severity_order.get(f.get("severity", "low"), 1), reverse=True)
+            triage = {"findings": findings_sorted[:25]}
+
+        patch_resp = None  # not using LLM yet
 
         # --- Save results ---
         result = {
@@ -159,9 +201,6 @@ async def process_review(review_id, payload):
 # QUEUE HANDLING
 # ------------------------------
 def enqueue_review(review_id, payload):
-    """
-    Add a new review job to the queue.json file.
-    """
     QUEUE_FILE.touch(exist_ok=True)
     try:
         queue_data = json.loads(QUEUE_FILE.read_text() or "[]")
@@ -195,3 +234,4 @@ if __name__ == "__main__":
         asyncio.run(main_loop())
     except KeyboardInterrupt:
         print("\n🛑 Worker stopped manually.")
+
