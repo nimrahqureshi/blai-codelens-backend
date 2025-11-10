@@ -1,6 +1,7 @@
 import os
 import uuid
-import asyncio
+import json
+from pathlib import Path
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -12,31 +13,36 @@ load_dotenv()
 # ✅ Initialize FastAPI app
 app = FastAPI(title="BLAI CodeLens Backend")
 
-# ✅ Define allowed origins (your frontend + local)
+# ✅ Allowed origins (frontend + local)
 ALLOWED_ORIGINS = [
-    "https://blai-codelens-frontend.vercel.app",   # your deployed frontend
+    "https://blai-codelens-frontend.vercel.app",
     "https://www.blai-codelens-frontend.vercel.app",
-    "https://blai-portfolio.vercel.app",           # optional secondary domain
+    "https://blai-portfolio.vercel.app",
     "https://www.blai-portfolio.vercel.app",
     "http://localhost:5173",
     "http://127.0.0.1:5173",
 ]
 
-# ✅ Add CORS middleware after app initialization
+# ✅ Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
-    allow_methods=["*"],       # allow all HTTP methods
-    allow_headers=["*"],       # allow all headers
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
-# ✅ Load API key safely
+# ✅ Load API key
 API_KEY = os.getenv("BLAI_API_KEY", "dev_key")
 print(f"✅ Loaded BLAI_API_KEY: {API_KEY}")
 
-# ✅ In-memory job results
-JOB_RESULTS = {}
+# ✅ Artifacts folder
+ARTIFACTS_DIR = Path("artifacts")
+ARTIFACTS_DIR.mkdir(exist_ok=True)
+
+# ✅ Queue file path (used by worker)
+QUEUE_FILE = Path("queue.json")
+QUEUE_FILE.touch(exist_ok=True)
 
 # ✅ Request model
 class SubmitRequest(BaseModel):
@@ -44,27 +50,23 @@ class SubmitRequest(BaseModel):
     ref: str | None = None
     notify_email: str | None = None
 
+# ------------------------------
+# HELPER: Enqueue real worker job
+# ------------------------------
+def enqueue_job(review_id: str, payload: dict):
+    """Append a new job to queue.json for worker.py to process"""
+    try:
+        queue_data = json.loads(QUEUE_FILE.read_text() or "[]")
+    except json.JSONDecodeError:
+        queue_data = []
 
-# ✅ Simulated async review process
-async def enqueue_review(review_id: str, data: dict):
-    print(f"📥 Started review job {review_id} for {data.get('repo_url')}")
-    await asyncio.sleep(4)  # simulate AI code review delay
+    queue_data.append({"review_id": review_id, "payload": payload})
+    QUEUE_FILE.write_text(json.dumps(queue_data, indent=2))
+    print(f"📥 Enqueued review job: {review_id}")
 
-    result = {
-        "repo": data.get("repo_url"),
-        "summary": "✅ Code review completed successfully.",
-        "issues": [
-            {"type": "style", "message": "Variable names follow Python naming conventions."},
-            {"type": "security", "message": "No exposed API keys or secrets detected."},
-            {"type": "structure", "message": "Project folder structure looks clean and modular."},
-        ],
-    }
-
-    JOB_RESULTS[review_id] = result
-    print(f"✅ Job {review_id} finished and stored results")
-
-
-# ✅ POST /submit — start code review
+# ------------------------------
+# POST /submit — start code review
+# ------------------------------
 @app.post("/submit")
 async def submit(req: SubmitRequest, request: Request):
     key = request.headers.get("x-api-key")
@@ -74,25 +76,32 @@ async def submit(req: SubmitRequest, request: Request):
     review_id = str(uuid.uuid4())
     print(f"📩 Received request for repo: {req.repo_url}")
 
-    asyncio.create_task(enqueue_review(review_id, req.dict()))
+    # ✅ Use real enqueue_job to push to queue.json
+    enqueue_job(review_id, req.dict())
+
     return {"review_id": review_id, "status": "queued"}
 
-
-# ✅ GET /artifacts/{id} — retrieve code review results
+# ------------------------------
+# GET /artifacts/{id} — fetch review result
+# ------------------------------
 @app.get("/artifacts/{review_id}")
 async def get_artifact(review_id: str):
-    if review_id not in JOB_RESULTS:
+    artifact_file = ARTIFACTS_DIR / f"{review_id}.json"
+    if not artifact_file.exists():
         raise HTTPException(status_code=404, detail="Result not ready yet — please retry later")
-    return JOB_RESULTS[review_id]
+    return json.loads(artifact_file.read_text(encoding="utf-8"))
 
-
-# ✅ Health check
+# ------------------------------
+# GET / — health check
+# ------------------------------
 @app.get("/")
 async def root():
     return {"message": "✅ BLAI CodeLens backend is running properly"}
 
-
-# ✅ Run locally
+# ------------------------------
+# Run locally
+# ------------------------------
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+
