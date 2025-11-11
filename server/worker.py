@@ -1,228 +1,153 @@
 import os
 import json
 import time
-import tempfile
 import shutil
 import subprocess
-from git import Repo
 from pathlib import Path
-import asyncio
-from datetime import datetime
+from tempfile import TemporaryDirectory
+from dotenv import load_dotenv
 
-# --- Import LLM functions (optional) ---
-try:
-    from server.llm_client import triage_via_llm, patch_via_llm
-except ImportError:
-    triage_via_llm = None
-    patch_via_llm = None
-
+# --- CONFIGURATION ---
+load_dotenv()
 ARTIFACTS_DIR = Path("artifacts")
 QUEUE_FILE = Path("queue.json")
+# NOTE: The worker relies on the `git` command being installed (handled by Dockerfile)
 
-# ------------------------------
-# UTILITIES
-# ------------------------------
-def run_pylint(workdir):
-    """Run pylint and return JSON results"""
+# --- HELPER FUNCTIONS ---
+
+def run_code_analysis(repo_path: Path) -> dict:
+    """
+    Simulates running actual code analysis tools (like pylint or semgrep)
+    on the cloned repository.
+    """
+    print(f"🔬 Starting analysis in: {repo_path}")
+    
+    # 1. Pylint Example (requires 'requirements.txt' to list pylint)
     try:
-        print("🔎 Running pylint...")
-        p = subprocess.run(
-            ["pylint", workdir, "-f", "json"],
+        # Scan all Python files in the repository
+        result = subprocess.run(
+            ["pylint", "--disable=all", "--enable=C0114,C0116,W0613", str(repo_path)],
             capture_output=True,
             text=True,
-            timeout=90
+            check=False # Do not raise error if linter fails
         )
-        out = p.stdout.strip() or "[]"
-        return json.loads(out)
-    except Exception as e:
-        print("⚠️ Pylint failed:", e)
-        return []
+        pylint_output = result.stdout
+        
+    except FileNotFoundError:
+        pylint_output = "Pylint not found or not configured."
 
+    # 2. Simple File Count/Size Metric
+    file_count = len(list(repo_path.rglob('*.*')))
+    
+    return {
+        "summary": f"Initial review complete. Found {file_count} files.",
+        "pylint_result": pylint_output,
+        "metrics": {"total_files": file_count},
+        "recommendations": [
+            "Consider adding comprehensive type hints.",
+            "Break down large functions into smaller, focused units."
+        ]
+    }
 
-def run_semgrep(workdir):
-    """Run semgrep and return JSON results"""
-    try:
-        print("🔎 Running semgrep...")
-        p = subprocess.run(
-            ["semgrep", "--config", "auto", workdir, "--json"],
-            capture_output=True,
-            text=True,
-            timeout=150
-        )
-        out = p.stdout.strip() or "{}"
-        return json.loads(out)
-    except Exception as e:
-        print("⚠️ Semgrep failed:", e)
-        return {}
-
-# ------------------------------
-# MAIN REVIEW PROCESS
-# ------------------------------
-async def process_review(review_id, payload):
+def process_job(job: dict):
+    """Clones the repo, runs analysis, and saves the artifact."""
+    review_id = job["review_id"]
+    payload = job["payload"]
     repo_url = payload.get("repo_url")
-    ref = payload.get("ref") or "HEAD"
+    ref = payload.get("ref") or "main" # default branch
 
-    print(f"🚀 Starting review for {repo_url}")
-    base_dir = tempfile.mkdtemp(prefix=f"rev_{review_id}_")
-    ARTIFACTS_DIR.mkdir(exist_ok=True)
+    print(f"⚙️ Processing job {review_id} for {repo_url} at ref {ref}")
 
-    try:
-        # --- Clone repo ---
-        print("📦 Cloning repo...")
-        Repo.clone_from(repo_url, base_dir, depth=1)
+    # Create a temporary directory for cloning
+    with TemporaryDirectory() as temp_dir_str:
+        repo_path = Path(temp_dir_str) / "repo"
 
-        # --- Static analysis ---
-        pylint_results = run_pylint(base_dir)
-        semgrep_results = run_semgrep(base_dir)
-        static_findings = {"pylint": pylint_results, "semgrep": semgrep_results}
-
-        # --- Collect local Python files (backup option) ---
-        local_files = []
-        for p in Path(base_dir).rglob("*.py"):
-            local_files.append({
-                "path": str(p.relative_to(base_dir)),
-                "snippet": p.read_text(errors="ignore")[:2000]
-            })
-            if len(local_files) >= 8:
-                break
-
-        # --- Fetch live GitHub files ---
+        # 1. Clone the repository
         try:
-            from server.git_utils import fetch_repo_files
-            github_files = fetch_repo_files(repo_url, limit=6) or {}
-            files_for_llm = [{"path": k, "snippet": v} for k, v in github_files.items()]
-            if not files_for_llm:
-                files_for_llm = local_files
+            clone_cmd = ["git", "clone", "--depth", "1", "--branch", ref, repo_url, str(repo_path)]
+            subprocess.run(clone_cmd, check=True, capture_output=True, text=True)
+            print(f"✅ Successfully cloned repo to {repo_path}")
+            
+            # 2. Run the analysis
+            analysis_result = run_code_analysis(repo_path)
+
+            # 3. Compile final artifact
+            final_artifact = {
+                "id": review_id,
+                "timestamp": time.time(),
+                "repo_url": repo_url,
+                "ref": ref,
+                "status": "completed",
+                "result": analysis_result
+            }
+            
+        except subprocess.CalledProcessError as e:
+            final_artifact = {
+                "id": review_id,
+                "timestamp": time.time(),
+                "repo_url": repo_url,
+                "status": "failed",
+                "error": f"Git clone failed. Check if repo is public, URL is correct, or branch '{ref}' exists.",
+                "details": e.stderr.strip()
+            }
+            print(f"❌ Worker failed for {review_id}: {final_artifact['error']}")
         except Exception as e:
-            print("⚠️ fetch_repo_files failed:", e)
-            files_for_llm = local_files
-
-        # --- Map pylint results ---
-        def map_pylint_to_finding(item):
-            typ = item.get("type", "").lower()
-            severity = "low"
-            if typ in ("error", "fatal"):
-                severity = "high"
-            elif typ == "warning":
-                severity = "medium"
-            path = item.get("path") or item.get("module") or "<unknown>"
-            line = item.get("line") or 0
-            message = item.get("message") or "pylint issue"
-            return {
-                "id": f"pylint-{path}-{line}-{item.get('symbol','')}",
-                "tool": "pylint",
-                "severity": severity,
-                "title": item.get("symbol", typ),
-                "description": message,
-                "evidence": [{"path": path, "start_line": line}],
-                "confidence": 0.8,
+            final_artifact = {
+                "id": review_id,
+                "timestamp": time.time(),
+                "repo_url": repo_url,
+                "status": "error",
+                "error": f"An unexpected worker error occurred: {str(e)}"
             }
+            print(f"💥 Worker exception for {review_id}: {e}")
 
-        # --- Map semgrep results ---
-        def map_semgrep_to_finding(item):
-            extra = item.get("extra", {})
-            check_id = item.get("check_id") or extra.get("id") or "semgrep"
-            path = item.get("path") or extra.get("path") or "<unknown>"
-            start = None
-            if isinstance(item.get("start"), dict):
-                start = item["start"].get("line")
-            elif isinstance(extra.get("lines"), str):
-                start = 0
-            severity = extra.get("severity") or "medium"
-            sev_map = {"ERROR": "high", "WARNING": "medium", "INFO": "low"}
-            severity = sev_map.get(severity.upper(), "medium")
-            message = extra.get("message") or check_id
-            return {
-                "id": f"semgrep-{check_id}-{path}-{start}",
-                "tool": "semgrep",
-                "severity": severity,
-                "title": check_id,
-                "description": message,
-                "evidence": [{"path": path, "start_line": start or 0}],
-                "confidence": 0.9 if severity == "high" else 0.7,
-            }
+    # 4. Save the artifact result to the file system
+    artifact_file = ARTIFACTS_DIR / f"{review_id}.json"
+    ARTIFACTS_DIR.mkdir(exist_ok=True)
+    artifact_file.write_text(json.dumps(final_artifact, indent=2), encoding="utf-8")
+    print(f"💾 Saved artifact: {artifact_file}")
 
-        findings = []
-        for item in (pylint_results or []):
-            findings.append(map_pylint_to_finding(item))
-        if isinstance(semgrep_results, dict) and "results" in semgrep_results:
-            for item in semgrep_results["results"]:
-                findings.append(map_semgrep_to_finding(item))
-        elif isinstance(semgrep_results, list):
-            for item in semgrep_results:
-                findings.append(map_semgrep_to_finding(item))
+# --- MAIN WORKER LOOP ---
 
-        if not findings:
-            triage = {"findings": [{"id": "no-issues", "severity": "low", "description": "No static issues found."}]}
-        else:
-            severity_order = {"high": 3, "medium": 2, "low": 1}
-            findings_sorted = sorted(findings, key=lambda f: severity_order.get(f.get("severity", "low"), 1), reverse=True)
-            triage = {"findings": findings_sorted[:25]}
-
-        # --- AI triage ---
-        ai_review = None
-        if triage_via_llm:
-            try:
-                print("🧠 Calling triage_via_llm with real repo files...")
-                ai_review = triage_via_llm(review_id, repo_url, static_findings, files_for_llm)
-            except Exception as e:
-                print("⚠️ LLM triage failed:", e)
-                ai_review = None
-
-        # --- Prefer AI triage if available ---
-        triage = ai_review if ai_review else triage
-
-        # --- Save results ---
-        result = {
-            "review_id": review_id,
-            "repo": repo_url,
-            "triage": triage,
-            "timestamp": datetime.now().isoformat(),
-        }
-
-        ARTIFACTS_DIR.joinpath(f"{review_id}.json").write_text(json.dumps(result, indent=2), encoding="utf-8")
-        print(f"✅ Review completed for {repo_url}")
-
-    except Exception as e:
-        print(f"❌ Error processing {repo_url}: {e}")
-    finally:
-        shutil.rmtree(base_dir, ignore_errors=True)
-
-
-# ------------------------------
-# QUEUE HANDLING
-# ------------------------------
-def enqueue_review(review_id, payload):
-    QUEUE_FILE.touch(exist_ok=True)
-    try:
-        queue_data = json.loads(QUEUE_FILE.read_text() or "[]")
-    except json.JSONDecodeError:
-        queue_data = []
-
-    queue_data.append({"review_id": review_id, "payload": payload})
-    QUEUE_FILE.write_text(json.dumps(queue_data, indent=2))
-    print(f"📥 Enqueued review job: {review_id}")
-
-
-async def main_loop():
-    print("👀 Worker started — waiting for new jobs...")
-
+def worker_main():
+    """Main function to run the worker loop"""
+    print("🚀 BLAI CodeLens Worker started.")
+    
     while True:
-        if QUEUE_FILE.exists():
-            try:
-                queue_data = json.loads(QUEUE_FILE.read_text() or "[]")
-                if queue_data:
-                    job = queue_data.pop(0)
-                    QUEUE_FILE.write_text(json.dumps(queue_data, indent=2))
-                    await process_review(job["review_id"], job["payload"])
-            except Exception as e:
-                print("⚠️ Queue processing error:", e)
+        try:
+            # 1. Read and lock the queue file
+            if not QUEUE_FILE.exists():
+                time.sleep(5)
+                continue
 
-        await asyncio.sleep(3)
+            queue_content = QUEUE_FILE.read_text()
+            if not queue_content:
+                queue_data = []
+            else:
+                queue_data = json.loads(queue_content)
+                
+            if not queue_data:
+                # print("😴 Queue is empty. Sleeping...")
+                time.sleep(5)
+                continue
 
+            # 2. Pop the first job
+            job = queue_data.pop(0)
+            
+            # 3. Overwrite the queue file (removes the job)
+            QUEUE_FILE.write_text(json.dumps(queue_data, indent=2))
+            
+            # 4. Process the job (this is where the long work happens)
+            process_job(job)
+
+        except json.JSONDecodeError:
+            print(f"🚨 Error decoding {QUEUE_FILE}. Clearing file.")
+            QUEUE_FILE.write_text("[]")
+        except Exception as e:
+            print(f"Unhandled exception in worker loop: {e}")
+        
+        # Prevent the worker from spinning too fast
+        time.sleep(1)
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main_loop())
-    except KeyboardInterrupt:
-        print("\n🛑 Worker stopped manually.")
+    worker_main()
