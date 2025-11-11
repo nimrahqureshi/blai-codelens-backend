@@ -19,6 +19,8 @@ ALLOWED_ORIGINS = [
     "https://www.blai-codelens-frontend.vercel.app",
     "https://blai-portfolio.vercel.app",
     "https://www.blai-portfolio.vercel.app",
+    # 🌟 NEW ORIGIN ADDED TO RESOLVE CORS ERROR FROM VERCEL BRANCH DEPLOYMENT 🌟
+    "https://blai-codelens-frontend-git-main-nimrahs-projects.vercel.app",
     "http://localhost:5173",
     "http://127.0.0.1:5173",
 ]
@@ -104,3 +106,4 @@ async def root():
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+    
